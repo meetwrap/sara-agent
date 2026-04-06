@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Sara — MeetWrap AI Assistant</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+      background: #0b0c10;
+      color: #e6f1ff;
+      font-family: system-ui, -apple-system, sans-serif;
+      display: grid;
+      place-items: center;
+    }
+
+    .wrap {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 24px;
+    }
+
+    .canvas-wrap {
+      position: relative;
+      width: 320px;
+      height: 320px;
+      border-radius: 50%;
+      overflow: hidden;
+      background: radial-gradient(circle at 50% 50%, #0d1117 0%, #0b0c10 100%);
+      border: 1px solid #1f2a3b;
+    }
+
+    canvas { width: 100%; height: 100%; display: block; }
+
+    .label {
+      font-size: 13px;
+      color: #9fb3c8;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    .pill {
+      font-size: 12px;
+      color: #9fb3c8;
+      background: #0f1320cc;
+      border: 1px solid #1f2a3b;
+      padding: 5px 12px;
+      border-radius: 999px;
+      min-width: 80px;
+      text-align: center;
+    }
+
+    .pill.speaking { color: #93c5fd; border-color: #2b6ef5; }
+    .pill.error    { color: #fca5a5; border-color: #7f1d1d; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="canvas-wrap">
+      <canvas id="wave"></canvas>
+    </div>
+    <span class="label">Sara</span>
+    <span class="pill" id="status">starting…</span>
+  </div>
+
+  <script type="module">
+    import Vapi from 'https://esm.sh/@vapi-ai/web@2';
+
+    const param = (k) => new URL(location.href).searchParams.get(k);
+    const PUBLIC_KEY   = param('public_key');
+    const ASSISTANT_ID = param('assistant_id');
+
+    const statusEl = document.getElementById('status');
+    const setStatus = (text, cls = '') => {
+      statusEl.textContent = text;
+      statusEl.className = 'pill' + (cls ? ' ' + cls : '');
+    };
+
+    const canvas = document.getElementById('wave');
+    const ctx = canvas.getContext('2d');
+    let W = 0, H = 0, Cx = 0, Cy = 0;
+    let currentVol = 0, speaking = false, t = 0;
+    const RINGS = 6;
+    const history = new Float32Array(RINGS);
+
+    function resize() {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = Math.min(2, devicePixelRatio || 1);
+      W = rect.width; H = rect.height;
+      canvas.width = W * dpr; canvas.height = H * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      Cx = W / 2; Cy = H / 2;
+    }
+    resize();
+    window.addEventListener('resize', resize, { passive: true });
+
+    function pushVol(v) {
+      for (let i = 0; i < RINGS - 1; i++) history[i] = history[i + 1];
+      history[RINGS - 1] = Math.max(0, Math.min(1, v + (Math.random() - 0.5) * 0.01));
+    }
+
+    function draw() {
+      requestAnimationFrame(draw);
+      ctx.clearRect(0, 0, W, H);
+      const bg = ctx.createRadialGradient(Cx, Cy, 0, Cx, Cy, Math.max(W, H) * 0.6);
+      bg.addColorStop(0, '#0b0f18'); bg.addColorStop(1, '#0b0c10');
+      ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+      t += 0.02;
+      currentVol *= 0.92;
+      pushVol(currentVol);
+
+      const Rmin = Math.min(W, H) * 0.45;
+      for (let i = 0; i < RINGS; i++) {
+        const age = i / (RINGS - 1);
+        const r = (Rmin * (i + 1) / (RINGS + 1))
+          * (1 + 0.015 * Math.sin(t + i * 0.35))
+          * (1 + history[i] * 0.05);
+        const lw = Math.max(1.5, Math.min(W, H) * 0.004) * (1 + age * 1.2 + history[i] * 0.8);
+        ctx.lineWidth = lw;
+        const peak = speaking ? '#2b6ef5' : '#5f677d';
+        const base = speaking ? '#9bb9ff' : '#7e88a8';
+        const alpha = 0.35 + 0.4 * (1 - age);
+        const g = ctx.createRadialGradient(Cx, Cy, r * 0.85, Cx, Cy, r);
+        g.addColorStop(0, hex(peak, 0.9 * alpha));
+        g.addColorStop(1, hex(base, 0.5 * alpha));
+        ctx.strokeStyle = g;
+        ctx.shadowColor = peak;
+        ctx.shadowBlur = speaking ? 8 : 4;
+        ctx.beginPath(); ctx.arc(Cx, Cy, r, 0, Math.PI * 2); ctx.stroke();
+      }
+      ctx.shadowBlur = 0;
+    }
+
+    function hex(h, a) {
+      const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(h);
+      if (!m) return h;
+      return `rgba(${parseInt(m[1],16)},${parseInt(m[2],16)},${parseInt(m[3],16)},${Math.min(1,Math.max(0,a))})`;
+    }
+
+    draw();
+
+    async function start() {
+      if (!PUBLIC_KEY || !ASSISTANT_ID) {
+        setStatus('missing credentials', 'error');
+        return;
+      }
+
+      try {
+        setStatus('requesting mic…');
+        await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (e) {
+        setStatus('mic denied', 'error');
+        return;
+      }
+
+      try {
+        setStatus('connecting…');
+        const vapi = new Vapi(PUBLIC_KEY);
+
+        vapi.on('call-start',  () => setStatus('listening', ''));
+        vapi.on('call-end',    () => setStatus('ended', ''));
+        vapi.on('error',  (e) => setStatus('error', 'error'));
+
+        vapi.on('speech-start', () => { speaking = true;  setStatus('speaking…', 'speaking'); });
+        vapi.on('speech-end',   () => { speaking = false; setStatus('listening', ''); });
+
+        vapi.on('volume-level', (v) => { currentVol = v; });
+
+        await vapi.start(ASSISTANT_ID);
+      } catch (e) {
+        setStatus('failed to connect', 'error');
+      }
+    }
+
+    start();
+  </script>
+</body>
+</html>
